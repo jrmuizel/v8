@@ -40,9 +40,11 @@
 #include <memory>
 
 #include "src/base/platform/wrappers.h"
+#include "src/baseline/bytecode-offset-iterator.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/source-position-table.h"
 #include "src/diagnostics/eh-frame.h"
+#include "src/objects/bytecode-array.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/shared-function-info.h"
@@ -357,6 +359,18 @@ void PerfJitLogger::LogWriteDebugInfo(Tagged<Code> code,
 
   Tagged<TrustedByteArray> source_position_table =
       code->SourcePositionTable(isolate_, raw_shared);
+  
+  bool is_baseline = code->kind() == CodeKind::BASELINE;
+  std::unique_ptr<baseline::BytecodeOffsetIterator> baseline_iterator;
+  if (is_baseline) {
+    Handle<BytecodeArray> bytecodes(raw_shared->GetBytecodeArray(isolate_),
+                                    isolate_);
+    Handle<TrustedByteArray> bytecode_offsets(code->bytecode_offset_table(),
+                                              isolate_);
+    baseline_iterator = std::make_unique<baseline::BytecodeOffsetIterator>(
+        bytecode_offsets, bytecodes);
+  }
+  
   // Compute the entry count and get the names of all scripts.
   // Avoid additional work if the script name is repeated. Multiple script
   // names only occur for cross-script inlining.
@@ -411,7 +425,14 @@ void PerfJitLogger::LogWriteDebugInfo(Tagged<Code> code,
     // The entry point of the function will be placed straight after the ELF
     // header when processed by "perf inject". Adjust the position addresses
     // accordingly.
-    entry.address_ = code_start + iterator.code_offset() + kElfHeaderSize;
+    int code_offset = iterator.code_offset();
+    if (is_baseline) {
+      // Use the bytecode offset to calculate pc offset for baseline code.
+      baseline_iterator->AdvanceToBytecodeOffset(code_offset);
+      code_offset =
+          static_cast<int>(baseline_iterator->current_pc_start_offset());
+    }
+    entry.address_ = code_start + code_offset + kElfHeaderSize;
     entry.line_number_ = info.line + 1;
     entry.column_ = info.column + 1;
     LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
