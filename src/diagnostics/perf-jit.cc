@@ -83,7 +83,8 @@ struct PerfJitBase {
     kMove = 1,
     kDebugInfo = 2,
     kClose = 3,
-    kUnwindingInfo = 4
+    kUnwindingInfo = 4,
+    kInline = 5
   };
 
   uint32_t event_;
@@ -121,6 +122,22 @@ struct PerfJitCodeUnwindingInfo : PerfJitBase {
 };
 
 const char PerfJitLogger::kFilenameFormatString[] = "%s/jit-%d.dump";
+struct PerfJitInlineEntry {
+  uint64_t start_addr_;
+  uint64_t end_addr_;
+  uint32_t call_file_;
+  uint32_t call_line_;
+  uint32_t call_column_;
+  uint32_t inline_depth_;
+  // Followed by null-terminated func_name and call_file_name strings.
+};
+
+struct PerfJitCodeInline : PerfJitBase {
+  uint64_t code_addr_;
+  uint64_t nr_entry_;
+  // Followed by nr_entry_ instances of PerfJitInlineEntry.
+};
+
 
 // Extra padding for the PID in the filename
 const int PerfJitLogger::kFilenameBufferPadding = 16;
@@ -254,6 +271,7 @@ void PerfJitLogger::LogRecordedBuffer(
         kind != CodeKind::WASM_TO_JS_FUNCTION) {
       DCHECK_IMPLIES(IsScript(sfi->script()),
                      Cast<Script>(sfi->script())->has_line_ends());
+      LogWriteInlineInfo(code, sfi);
       LogWriteDebugInfo(code, sfi);
     }
   }
@@ -413,7 +431,7 @@ void PerfJitLogger::LogWriteDebugInfo(Tagged<Code> code,
   debug_info.size_ = size + padding;
   LogWriteBytes(reinterpret_cast<const char*>(&debug_info), sizeof(debug_info));
 
-  Address code_start = code->instruction_start();
+  Address coe_start = code->instruction_start();
 
   last_script = Smi::zero();
   int script_names_index = 0;
@@ -521,6 +539,100 @@ void PerfJitLogger::LogWriteDebugInfo(const wasm::WasmCode* code) {
   LogWriteBytes(padding_bytes, padding);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
+                                            Handle<SharedFunctionInfo> shared) {
+  DisallowGarbageCollection no_gc;
+  Tagged<SharedFunctionInfo> raw_shared = *shared;
+  if (!raw_shared->HasSourceCode()) return;
+
+  // Only generate inline info for optimized code that has inlining information
+  if (!code->is_turbofanned()) return;
+
+  Tagged<TrustedByteArray> source_position_table =
+      code->SourcePositionTable(isolate_, raw_shared);
+
+  // Collect inline entries from source position table
+  std::vector<std::pair<SourcePositionInfo, int>> inline_entries;
+  
+  for (SourcePositionTableIterator iterator(source_position_table);
+       !iterator.done(); iterator.Advance()) {
+    SourcePosition pos = iterator.source_position();
+    if (pos.isInlined()) {
+      SourcePositionInfo info(GetSourcePositionInfo(isolate_, code, shared, pos));
+      inline_entries.emplace_back(info, iterator.code_offset());
+    }
+  }
+
+  if (inline_entries.empty()) return;
+
+  PerfJitCodeInline inline_info;
+  uint32_t size = sizeof(inline_info);
+  uint32_t entry_count = static_cast<uint32_t>(inline_entries.size());
+
+  // Calculate size requirements for variable-length data
+  for (const auto& entry_pair : inline_entries) {
+    const SourcePositionInfo& info = entry_pair.first;
+    size += sizeof(PerfJitInlineEntry);
+    
+    // Function name - use function name from shared function info
+    const char* func_name = raw_shared->DebugNameCStr().get();
+    if (func_name) {
+      size += strlen(func_name) + 1;
+    } else {
+      size += 1; // Just null terminator for empty name
+    }
+    
+    // Call file name - get script name
+    std::unique_ptr<char[]> name_storage;
+    auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
+    size += script_name.size() + 1;
+  }
+
+  inline_info.event_ = PerfJitBase::kInline;
+  inline_info.time_stamp_ = GetTimestamp();
+  inline_info.code_addr_ = code->instruction_start();
+  inline_info.nr_entry_ = entry_count;
+
+  int padding = ((size + 7) & (~7)) - size;
+  inline_info.size_ = size + padding;
+
+  LogWriteBytes(reinterpret_cast<const char*>(&inline_info), sizeof(inline_info));
+
+  // Write inline entries
+  Address code_start = code->instruction_start();
+  
+  for (const auto& entry_pair : inline_entries) {
+    const SourcePositionInfo& info = entry_pair.first;
+    int code_offset = entry_pair.second;
+    
+    PerfJitInlineEntry entry;
+    entry.start_addr_ = code_offset;
+    entry.end_addr_ = code_offset + 1; // Simplified: single instruction range
+    entry.call_file_ = 1; // File ID (simplified: always 1)
+    entry.call_line_ = static_cast<uint32_t>(info.line + 1);
+    entry.call_column_ = static_cast<uint32_t>(info.column);
+    entry.inline_depth_ = 1; // Simplified: single level inlining
+    
+    LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
+    
+    // Write function name
+    const char* func_name = raw_shared->DebugNameCStr().get();
+    if (func_name) {
+      LogWriteBytes(func_name, strlen(func_name));
+    }
+    LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
+    
+    // Write call file name
+    std::unique_ptr<char[]> name_storage;
+    auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
+    LogWriteBytes(script_name.begin(), static_cast<uint32_t>(script_name.size()));
+    LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
+  }
+
+  char padding_bytes[8] = {0};
+  LogWriteBytes(padding_bytes, padding);
+}
 
 void PerfJitLogger::LogWriteUnwindingInfo(Tagged<Code> code) {
   PerfJitCodeUnwindingInfo unwinding_info_header;
