@@ -574,15 +574,16 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
   for (const auto& entry_pair : inline_entries) {
     const SourcePositionInfo& info = entry_pair.first;
     size += sizeof(PerfJitInlineEntry);
-    
-    // Function name - use function name from shared function info
-    const char* func_name = raw_shared->DebugNameCStr().get();
+
+    // Function name - use function name from inlined function's shared function info
+    Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
+    auto func_name = inlined_shared->DebugNameCStr();
     if (func_name) {
-      size += strlen(func_name) + 1;
+      size += strlen(func_name.get()) + 1;
     } else {
       size += 1; // Just null terminator for empty name
     }
-    
+
     // Call file name - get script name
     std::unique_ptr<char[]> name_storage;
     auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
@@ -600,7 +601,7 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
   LogWriteBytes(reinterpret_cast<const char*>(&inline_info), sizeof(inline_info));
 
   // Write inline entries
-  Address code_start = code->instruction_start();
+  // Address coe_start = code->instruction_start();
   
   for (const auto& entry_pair : inline_entries) {
     const SourcePositionInfo& info = entry_pair.first;
@@ -615,14 +616,15 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
     entry.inline_depth_ = 1; // Simplified: single level inlining
     
     LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
-    
-    // Write function name
-    const char* func_name = raw_shared->DebugNameCStr().get();
+
+    // Write function name - use inlined function's name
+    Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
+    auto func_name = inlined_shared->DebugNameCStr();
     if (func_name) {
-      LogWriteBytes(func_name, strlen(func_name));
+      LogWriteBytes(func_name.get(), strlen(func_name.get()));
     }
     LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
-    
+
     // Write call file name
     std::unique_ptr<char[]> name_storage;
     auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
