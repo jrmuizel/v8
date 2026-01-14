@@ -431,7 +431,7 @@ void PerfJitLogger::LogWriteDebugInfo(Tagged<Code> code,
   debug_info.size_ = size + padding;
   LogWriteBytes(reinterpret_cast<const char*>(&debug_info), sizeof(debug_info));
 
-  Address coe_start = code->instruction_start();
+  Address code_start = code->instruction_start();
 
   last_script = Smi::zero();
   int script_names_index = 0;
@@ -541,7 +541,7 @@ void PerfJitLogger::LogWriteDebugInfo(const wasm::WasmCode* code) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
-                                            Handle<SharedFunctionInfo> shared) {
+                                       DirectHandle<SharedFunctionInfo> shared) {
   DisallowGarbageCollection no_gc;
   Tagged<SharedFunctionInfo> raw_shared = *shared;
   if (!raw_shared->HasSourceCode()) return;

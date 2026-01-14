@@ -86,7 +86,7 @@ class PerfJitLogger : public CodeEventLogger {
 #if V8_ENABLE_WEBASSEMBLY
   void LogWriteDebugInfo(const wasm::WasmCode* code);
 #endif  // V8_ENABLE_WEBASSEMBLY
-  void LogWriteInlineInfo(Tagged<Code> code, Handle<SharedFunctionInfo> shared);
+  void LogWriteInlineInfo(Tagged<Code> code, DirectHandle<SharedFunctionInfo> shared);
   void LogWriteUnwindingInfo(Tagged<Code> code);
 
   static const uint32_t kElfMachIA32 = 3;
