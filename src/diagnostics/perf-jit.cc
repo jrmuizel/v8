@@ -552,15 +552,16 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
   Tagged<TrustedByteArray> source_position_table =
       code->SourcePositionTable(isolate_, raw_shared);
 
-  // Collect inline entries from source position table
-  std::vector<std::pair<SourcePositionInfo, int>> inline_entries;
-  
+  // Collect inline entries from source position table with full inlining stacks
+  std::vector<std::pair<std::vector<SourcePositionInfo>, int>> inline_entries;
+
   for (SourcePositionTableIterator iterator(source_position_table);
        !iterator.done(); iterator.Advance()) {
     SourcePosition pos = iterator.source_position();
     if (pos.isInlined()) {
-      SourcePositionInfo info(GetSourcePositionInfo(isolate_, code, shared, pos));
-      inline_entries.emplace_back(info, iterator.code_offset());
+      // Get the full inlining stack instead of just the leaf
+      std::vector<SourcePositionInfo> inlining_stack = pos.InliningStack(isolate_, code);
+      inline_entries.emplace_back(inlining_stack, iterator.code_offset());
     }
   }
 
@@ -568,68 +569,80 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
 
   PerfJitCodeInline inline_info;
   uint32_t size = sizeof(inline_info);
-  uint32_t entry_count = static_cast<uint32_t>(inline_entries.size());
+
+  // Count total entries across all inlining stacks
+  uint32_t total_entry_count = 0;
+  for (const auto& entry_pair : inline_entries) {
+    total_entry_count += static_cast<uint32_t>(entry_pair.first.size());
+  }
 
   // Calculate size requirements for variable-length data
   for (const auto& entry_pair : inline_entries) {
-    const SourcePositionInfo& info = entry_pair.first;
-    size += sizeof(PerfJitInlineEntry);
+    const std::vector<SourcePositionInfo>& stack = entry_pair.first;
 
-    // Function name - use function name from inlined function's shared function info
-    Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
-    auto func_name = inlined_shared->DebugNameCStr();
-    if (func_name) {
-      size += strlen(func_name.get()) + 1;
-    } else {
-      size += 1; // Just null terminator for empty name
+    for (const SourcePositionInfo& info : stack) {
+      size += sizeof(PerfJitInlineEntry);
+
+      // Function name - use function name from inlined function's shared function info
+      Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
+      auto func_name = inlined_shared->DebugNameCStr();
+      if (func_name) {
+        size += strlen(func_name.get()) + 1;
+      } else {
+        size += 1; // Just null terminator for empty name
+      }
+
+      // Call file name - get script name
+      std::unique_ptr<char[]> name_storage;
+      auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
+      size += script_name.size() + 1;
     }
-
-    // Call file name - get script name
-    std::unique_ptr<char[]> name_storage;
-    auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
-    size += script_name.size() + 1;
   }
 
   inline_info.event_ = PerfJitBase::kInline;
   inline_info.time_stamp_ = GetTimestamp();
   inline_info.code_addr_ = code->instruction_start();
-  inline_info.nr_entry_ = entry_count;
+  inline_info.nr_entry_ = total_entry_count;
 
   int padding = ((size + 7) & (~7)) - size;
   inline_info.size_ = size + padding;
 
   LogWriteBytes(reinterpret_cast<const char*>(&inline_info), sizeof(inline_info));
 
-  // Write inline entries
-  // Address coe_start = code->instruction_start();
-  
+  // Write inline entries with full inlining stack
   for (const auto& entry_pair : inline_entries) {
-    const SourcePositionInfo& info = entry_pair.first;
+    const std::vector<SourcePositionInfo>& stack = entry_pair.first;
     int code_offset = entry_pair.second;
-    
-    PerfJitInlineEntry entry;
-    entry.start_addr_ = code_offset;
-    entry.end_addr_ = code_offset + 1; // Simplified: single instruction range
-    entry.call_file_ = 1; // File ID (simplified: always 1)
-    entry.call_line_ = static_cast<uint32_t>(info.line + 1);
-    entry.call_column_ = static_cast<uint32_t>(info.column);
-    entry.inline_depth_ = 1; // Simplified: single level inlining
-    
-    LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
 
-    // Write function name - use inlined function's name
-    Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
-    auto func_name = inlined_shared->DebugNameCStr();
-    if (func_name) {
-      LogWriteBytes(func_name.get(), strlen(func_name.get()));
+    // Write each level of the inlining stack
+    // Stack is ordered from leaf (most deeply inlined) to root
+    for (size_t depth = 0; depth < stack.size(); ++depth) {
+      const SourcePositionInfo& info = stack[depth];
+
+      PerfJitInlineEntry entry;
+      entry.start_addr_ = code_offset;
+      entry.end_addr_ = code_offset + 1; // Simplified: single instruction range
+      entry.call_file_ = 1; // File ID (simplified: always 1)
+      entry.call_line_ = static_cast<uint32_t>(info.line + 1);
+      entry.call_column_ = static_cast<uint32_t>(info.column);
+      entry.inline_depth_ = static_cast<uint32_t>(depth);
+
+      LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
+
+      // Write function name - use inlined function's name
+      Tagged<SharedFunctionInfo> inlined_shared = *info.shared;
+      auto func_name = inlined_shared->DebugNameCStr();
+      if (func_name) {
+        LogWriteBytes(func_name.get(), strlen(func_name.get()));
+      }
+      LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
+
+      // Write call file name
+      std::unique_ptr<char[]> name_storage;
+      auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
+      LogWriteBytes(script_name.begin(), static_cast<uint32_t>(script_name.size()));
+      LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
     }
-    LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
-
-    // Write call file name
-    std::unique_ptr<char[]> name_storage;
-    auto script_name = GetScriptName(*info.script, &name_storage, no_gc);
-    LogWriteBytes(script_name.begin(), static_cast<uint32_t>(script_name.size()));
-    LogWriteBytes(kStringTerminator, sizeof(kStringTerminator));
   }
 
   char padding_bytes[8] = {0};
