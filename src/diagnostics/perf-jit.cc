@@ -558,6 +558,8 @@ void PerfJitLogger::LogWriteInlineInfo(Tagged<Code> code,
       // Get the full inlining stack instead of just the leaf
       std::vector<SourcePositionInfo> inlining_stack = pos.InliningStack(isolate_, code);
       inline_entries.emplace_back(inlining_stack, iterator.code_offset());
+    } else {
+      inline_entries.emplace_back(std::vector<SourcePositionInfo>{SourcePositionInfo(isolate_, pos, shared)}, iterator.code_offset());
     }
   }
 
